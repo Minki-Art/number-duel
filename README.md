@@ -6,7 +6,7 @@
 
 规则来自我小学课间和同学**用手玩**的一个游戏 —— 现在把它做成了能在浏览器里联机对战的版本。
 
-[![CI](https://github.com/YOUR_NAME/number-duel/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_NAME/number-duel/actions/workflows/ci.yml)
+[![CI](https://github.com/Minki-Art/number-duel/actions/workflows/ci.yml/badge.svg)](https://github.com/Minki-Art/number-duel/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-133%20passed-brightgreen)
 ![Dependencies](https://img.shields.io/badge/核心引擎-零依赖-orange)
