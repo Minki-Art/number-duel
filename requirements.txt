@@ -1,0 +1,8 @@
+# Number Duel 运行依赖
+#
+# 核心引擎（game_engine.py / ai.py）与全部单元测试只用标准库，不需要装任何东西。
+# 下面三个只有跑联机服务端（server.py）时才需要。
+
+fastapi>=0.110
+uvicorn>=0.27
+websockets>=12

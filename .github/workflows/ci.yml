@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行全部测试（引擎 / AI / 服务端集成）
+        run: python -m unittest discover -s . -p "test_*.py" -v
+
+      - name: 冒烟测试：核心引擎不依赖第三方库
+        run: |
+          python -c "
+          import game_engine, ai
+          e = game_engine.GameEngine()
+          e.execute_action('A', 1, 1, '+')
+          print('引擎独立运行正常:', e.get_render_data()['A'])
+          "
