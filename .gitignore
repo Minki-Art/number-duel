@@ -30,3 +30,7 @@ Thumbs.db
 # 工具产生的临时文件
 web/_shot_*.png
 *.log
+
+# 本地交接文档（含个人背景信息，不发布）
+HANDOFF.md
+
