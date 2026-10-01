@@ -169,6 +169,15 @@ def build_state(room: Room, viewer: str) -> dict:
             "stall_streak": engine.get_stall_streak(),
             "stalemate_limit": GameEngine.STALEMATE_LIMIT,
             "idle_loss_streak": GameEngine.IDLE_LOSS_STREAK,
+            # 防刷状态：每个槽位当前"已触发过、等数字刷新"的技能名（UI 据此把数字变灰）
+            "locks": {
+                "A": engine.get_skill_locks("A"),
+                "B": engine.get_skill_locks("B"),
+            },
+            # 败因说明（对局未结束时为空字符串）
+            "end_reason": engine.get_end_reason(),
+            # 操作预演：该玩家 8 种操作各自会触发什么技能（UI 在加减弹层里提示）
+            "previews": engine.get_action_previews(viewer),
         },
     }
 

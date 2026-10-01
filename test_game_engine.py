@@ -375,52 +375,56 @@ class TestDrillSkill(unittest.TestCase):
 
 
 class TestBoomerangSkill(unittest.TestCase):
-    """技能 2：两个数字个位数都是 8 -> 1 点伤害；两个都 >= 30 -> 2 点伤害。"""
+    """技能 2：两个数字个位数都是 8 -> 固定 2 点伤害（不再区分重击档位）。"""
 
     def test_a_double_eight_damages_b(self):
         engine = build_engine(a1=18, a2=28)
         events = check(engine)
-        self.assertEqual(engine.hp_b, 2)
+        self.assertEqual(engine.hp_b, 1)
         self.assertIn("旋镖", joined(events))
+        self.assertIn("受到2点伤害", joined(events))
 
     def test_b_double_eight_damages_a(self):
         engine = build_engine(a1=1, a2=1, b1=18, b2=28)
         events = check(engine)
-        self.assertEqual(engine.hp_a, 2)
+        self.assertEqual(engine.hp_a, 1)
         self.assertIn("旋镖", joined(events))
-
-    def test_double_eight_deals_two_when_both_at_least_thirty(self):
-        engine = build_engine(a1=38, a2=38)
-        events = check(engine)
-        self.assertEqual(engine.hp_b, 1)
         self.assertIn("受到2点伤害", joined(events))
 
-    def test_double_eight_deals_one_when_only_one_at_least_thirty(self):
-        engine = build_engine(a1=38, a2=28)
-        check(engine)
-        self.assertEqual(engine.hp_b, 2)
+    def test_double_eight_damage_is_two_regardless_of_value_range(self):
+        """18/28、38/28、38/38 三种组合伤害都是 2。
+
+        旧规则里只有"两个数字都 >= 30"才是 2 点，另外两种只有 1 点；
+        现在取消该档位，三种组合统一 2 点。
+        """
+        for value_1, value_2 in ((18, 28), (38, 28), (38, 38)):
+            with self.subTest(values=(value_1, value_2)):
+                engine = build_engine(a1=value_1, a2=value_2, hp_b=5)
+                events = check(engine)
+                self.assertEqual(engine.hp_b, 3)
+                self.assertIn("受到2点伤害", joined(events))
 
     def test_boomerang_anti_farm_requires_both_numbers_changed(self):
         # A1 = 18 已就位，A2 = 24 -> 加 4 变 28，凑成双个位 8 触发旋镖
         engine = build_engine(a1=18, a2=24, b1=14, b2=11, hp_b=5)
         nudge(engine, "A", 2, up=True)
         self.assertEqual(engine.A2, 28)
-        self.assertEqual(engine.hp_b, 4)
+        self.assertEqual(engine.hp_b, 3)
 
         # 只有 A2 在动：回到 24 再回到 28，A1 一直没变过 -> 拦截
         nudge(engine, "A", 2, up=False)
         events = nudge(engine, "A", 2, up=True)
         self.assertEqual(engine.A2, 28)
-        self.assertEqual(engine.hp_b, 4)
+        self.assertEqual(engine.hp_b, 3)
         self.assertNotIn("旋镖", joined(events))
 
         # 让 A1 也真正变化一次（18 -> 14 -> 18），两个数字都刷新过 -> 再次触发
         nudge(engine, "A", 1, up=False)
-        self.assertEqual(engine.hp_b, 4)
+        self.assertEqual(engine.hp_b, 3)
         events = nudge(engine, "A", 1, up=True)
         self.assertEqual(engine.A1, 18)
         self.assertIn("旋镖", joined(events))
-        self.assertEqual(engine.hp_b, 3)
+        self.assertEqual(engine.hp_b, 1)
 
     def test_boomerang_triggered_through_execute_action(self):
         # A2 = 24 -> 加上守方个位 4 变成 28，与 A1 = 18 组成双 8
@@ -428,7 +432,7 @@ class TestBoomerangSkill(unittest.TestCase):
         events = engine.execute_action("A", 2, 1, "+")
         self.assertEqual(engine.A2, 28)
         self.assertIn("旋镖", joined(events))
-        self.assertEqual(engine.hp_b, 2)
+        self.assertEqual(engine.hp_b, 1)
 
 
 class TestFortuneSkill(unittest.TestCase):
@@ -1064,6 +1068,153 @@ class TestRenderData(unittest.TestCase):
         self.assertFalse(engine.is_game_over())
         self.assertEqual(engine.current_turn, "A")
         self.assertEqual((engine.A1, engine.A2), (16, 29))
+
+
+class TestSkillLocks(unittest.TestCase):
+    """防刷状态的对外查询：UI 用它把"已触发、等刷新"的数字显示成灰色。"""
+
+    def test_single_skill_lock_and_release(self):
+        engine = build_engine(a1=6, a2=1, b1=13, b2=11)
+        check(engine)  # A1 个位 6 -> 回血
+        self.assertEqual(engine.get_skill_locks("A"), {"A1": ["回血"], "A2": []})
+
+        # 6 -> 9（守方 B1 个位 3），数字变过且 9 不触发任何技能 -> 锁解除
+        nudge(engine, "A", 1, up=True)
+        self.assertEqual(engine.A1, 9)
+        self.assertEqual(engine.get_skill_locks("A"), {"A1": [], "A2": []})
+
+    def test_pair_skill_locks_both_slots(self):
+        engine = build_engine(a1=18, a2=28)
+        check(engine)  # 双个位 8 -> 旋镖
+        self.assertEqual(engine.get_skill_locks("A"), {"A1": ["旋镖"], "A2": ["旋镖"]})
+
+    def test_locks_are_per_player(self):
+        engine = build_engine(a1=18, a2=28, b1=1, b2=1)
+        check(engine)
+        self.assertEqual(engine.get_skill_locks("B"), {"B1": [], "B2": []})
+
+    def test_no_locks_before_any_trigger(self):
+        engine = build_engine(a1=6, a2=7)
+        self.assertEqual(engine.get_skill_locks("A"), {"A1": [], "A2": []})
+
+    def test_invalid_player_rejected(self):
+        with self.assertRaises(ValueError):
+            build_engine().get_skill_locks("C")
+
+
+class TestActionPreviews(unittest.TestCase):
+    """操作预演：玩家在选择 ＋/－ 时提示这一手能触发什么技能。
+
+    预演在副本上真实执行，因此不需要在 UI 层复制任何技能条件。
+    """
+
+    def make_engine(self, **kwargs):
+        # A1=15、A2=18；B1=13（个位 3）
+        return build_engine(a1=15, a2=18, b1=13, b2=11, **kwargs)
+
+    def test_preview_reports_boomerang(self):
+        engine = self.make_engine()
+        # A1 15 + 3 = 18，与 A2 = 18 凑成双个位 8
+        preview = engine.get_action_previews("A")["1"]["1"]["+"]
+        self.assertEqual(preview["skills"], [{"player": "A", "skill": "旋镖"}])
+        self.assertFalse(preview["finish"])
+
+    def test_preview_reports_slap(self):
+        engine = self.make_engine()
+        # A2 18 - 3 = 15，与 A1 = 15 凑成双个位 5 且都 >= 15
+        preview = engine.get_action_previews("A")["2"]["1"]["-"]
+        self.assertEqual(preview["skills"], [{"player": "A", "skill": "巴掌"}])
+
+    def test_preview_empty_when_result_triggers_nothing(self):
+        engine = self.make_engine()
+        # A2 18 + 3 = 21 -> A1 个位 5、A2 个位 1，不满足任何技能
+        preview = engine.get_action_previews("A")["2"]["1"]["+"]
+        self.assertEqual(preview["skills"], [])
+
+    def test_preview_marks_finishing_move(self):
+        engine = self.make_engine(hp_b=2)
+        # 旋镖造成 2 点伤害，B 剩 2 血 -> 这一手直接终结对局
+        preview = engine.get_action_previews("A")["1"]["1"]["+"]
+        self.assertTrue(preview["finish"])
+
+    def test_preview_covers_all_eight_actions(self):
+        engine = self.make_engine()
+        previews = engine.get_action_previews("A")
+        self.assertEqual(sorted(previews), ["1", "2"])
+        for slots in previews.values():
+            self.assertEqual(sorted(slots), ["1", "2"])
+            for by_operation in slots.values():
+                self.assertEqual(sorted(by_operation), ["+", "-"])
+
+    def test_preview_matches_real_execution(self):
+        """预演结果必须与真实执行完全一致（防止两套逻辑出现偏差）。"""
+        engine = self.make_engine(hp_b=4)
+        previews = engine.get_action_previews("A")
+        for slot in (1, 2):
+            for foe_slot in (1, 2):
+                for operation in ("+", "-"):
+                    real = engine.clone()
+                    events = real.execute_action("A", slot, foe_slot, operation)
+                    preview = previews[str(slot)][str(foe_slot)][operation]
+                    self.assertEqual(
+                        preview["skills"],
+                        GameEngine._skills_in_events(events),
+                        f"预演与实走不一致：{slot} 打 {foe_slot} 用 {operation}",
+                    )
+                    self.assertEqual(preview["finish"], real.is_game_over())
+
+    def test_preview_does_not_mutate_real_game(self):
+        engine = self.make_engine()
+        before = (engine.A1, engine.A2, engine.B1, engine.B2, engine.hp_a, engine.hp_b)
+        engine.get_action_previews("A")
+        self.assertEqual(
+            (engine.A1, engine.A2, engine.B1, engine.B2, engine.hp_a, engine.hp_b), before
+        )
+
+    def test_preview_empty_when_not_your_turn(self):
+        engine = build_engine(turn="B")
+        self.assertEqual(engine.get_action_previews("A"), {})
+
+    def test_preview_empty_after_game_over(self):
+        engine = build_engine()
+        engine.surrender("A")
+        self.assertEqual(engine.get_action_previews("B"), {})
+
+
+class TestEndReason(unittest.TestCase):
+    """败因说明：结算界面用它告诉玩家"你是怎么赢/输的"。"""
+
+    def test_empty_while_running(self):
+        self.assertEqual(build_engine().get_end_reason(), "")
+
+    def test_hp_zero(self):
+        engine = build_engine(a1=17, b1=11, b2=11, hp_b=1)
+        check(engine)  # 钻头 -> B 血量归零
+        self.assertEqual(engine.get_end_reason(), "B血量归零")
+
+    def test_surrender(self):
+        engine = build_engine()
+        engine.surrender("A")
+        self.assertEqual(engine.get_end_reason(), "A认输")
+
+    def test_idle_loss(self):
+        engine = build_engine(a1=5, a2=5, b1=10, b2=10)
+        for _ in range(GameEngine.IDLE_LOSS_STREAK):
+            engine.current_turn = "A"
+            engine.execute_action("A", 1, 1, "-")  # 5 - 个位 0 = 5，永远空过
+        self.assertEqual(engine.get_end_reason(), "A连续4回合空过判负")
+
+    def test_stalemate_by_hp(self):
+        engine = build_engine(a1=14, a2=5, b1=14, b2=5, hp_a=5, hp_b=3)
+        silent_exchange(engine, GameEngine.STALEMATE_LIMIT)
+        self.assertEqual(engine.get_winner(), "A")
+        self.assertIn("按血量判定 A 胜", engine.get_end_reason())
+
+    def test_stalemate_draw(self):
+        engine = build_engine(a1=14, a2=5, b1=14, b2=5, hp_a=4, hp_b=4)
+        silent_exchange(engine, GameEngine.STALEMATE_LIMIT)
+        self.assertTrue(engine.is_draw())
+        self.assertIn("判平局", engine.get_end_reason())
 
 
 if __name__ == "__main__":

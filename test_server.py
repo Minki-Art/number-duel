@@ -135,6 +135,35 @@ class ServerTestCase(unittest.TestCase):
             state = await recv_until(ws, "state")
             self.assertEqual(state["game"]["turn"], "A", "AI 走完后应轮回 A")
 
+    def test_state_carries_ui_support_fields(self):
+        """UI 需要的三个新增字段：防刷锁定、败因、操作预演。"""
+        room = http_json("/api/rooms", {"mode": "ai", "difficulty": "easy", "name": "我"})
+        asyncio.run(self._ui_fields(room["code"]))
+
+    async def _ui_fields(self, code: str) -> None:
+        async with connect(f"{WS_BASE}/ws/{code}?role=A&name=%E6%88%91") as ws:
+            state = await recv_until(ws, "state")
+            self.assertEqual(state["names"]["A"], "我")
+            self.assertEqual(state["names"]["B"], "AI·简单")
+
+            game = state["game"]
+            # 开局还没有任何技能触发过 -> 没有锁定
+            self.assertEqual(
+                game["locks"],
+                {"A": {"A1": [], "A2": []}, "B": {"B1": [], "B2": []}},
+            )
+            self.assertEqual(game["end_reason"], "")
+
+            # 操作预演覆盖 8 种操作，每项都带 skills / finish
+            previews = game["previews"]
+            self.assertEqual(sorted(previews), ["1", "2"])
+            for by_defender in previews.values():
+                for by_operation in by_defender.values():
+                    self.assertEqual(sorted(by_operation), ["+", "-"])
+                    for entry in by_operation.values():
+                        self.assertIn("skills", entry)
+                        self.assertIn("finish", entry)
+
     def test_ai_move_rejected_when_not_your_turn(self):
         room = http_json("/api/rooms", {"mode": "ai", "difficulty": "easy", "name": "我"})
         asyncio.run(self._wrong_turn(room["code"]))

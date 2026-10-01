@@ -33,4 +33,4 @@ web/_shot_*.png
 
 # 本地交接文档（含个人背景信息，不发布）
 HANDOFF.md
-
+.gitignore

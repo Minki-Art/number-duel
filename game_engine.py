@@ -100,15 +100,27 @@ class GameEngine:
     SLOTS: Tuple[int, ...] = (1, 2)
     OPERATIONS: Tuple[str, ...] = ("+", "-")
 
+    #: 技能内部标识 -> 中文名。事件日志、UI 提示、防刷状态查询共用这一份映射。
+    SKILL_LABELS: Dict[str, str] = {
+        "heal": "回血",
+        "drill": "钻头",
+        "boomerang": "旋镖",
+        "fortune": "恭喜发财",
+        "candy": "糖葫芦",
+        "chain": "锁链",
+        "slap": "巴掌",
+    }
+
     # ------------------------------------------------------ 技能 1：回血（个位6）
     HEAL_ONES: int = 6
     HEAL_AMOUNT: int = 1
 
     # ------------------------------------------------------ 技能 2：旋镖（双个位8）
+    # 触发条件苛刻（两个数字个位都必须是 8，是七个技能里最难凑的双数字技能），
+    # 因此伤害固定为 2 点，不再区分"两个数字都 >= 30"的重击档位：
+    # 一局平均只有 30 手左右，等两个数字都堆到 30 以上，对局往往已经结束了。
     BOOMERANG_ONES: int = 8
-    BOOMERANG_DAMAGE: int = 1
-    BOOMERANG_HEAVY_DAMAGE: int = 2
-    BOOMERANG_HEAVY_MIN: int = 30
+    BOOMERANG_DAMAGE: int = 2
 
     # ------------------------------- 技能 3：恭喜发财，小命拿来（都≥30 且个位5和0）
     FORTUNE_MIN: int = 30
@@ -154,6 +166,8 @@ class GameEngine:
         self._winner: Optional[str] = None
         # 是否以平局收场（僵持判定时双方血量相同）
         self._drawn: bool = False
+        # 对局以什么方式结束的一句话说明（结算界面展示"你是怎么赢/输的"）
+        self._end_reason: str = ""
         # 连续多少手都没有打出"总血量新低"（僵持判定用）
         self._stall_streak: int = 0
         # 历史最低总血量：只有跌破它才算"有进展"
@@ -247,6 +261,13 @@ class GameEngine:
         self._validate_player(player)
         return self._slap_turns_left[player]
 
+    def get_end_reason(self) -> str:
+        """返回"这局是怎么结束的"的一句话说明，供结算界面展示。
+
+        对局尚未结束时返回空字符串。
+        """
+        return self._end_reason if self.is_game_over() else ""
+
     def get_render_data(self) -> Dict[str, object]:
         """返回渲染所需的纯数据，不做任何 UI / 动画 / 终端输出。
 
@@ -270,6 +291,91 @@ class GameEngine:
             "hp_b": self.hp_b,
             "events": list(self._events),
         }
+
+    def get_skill_locks(self, player: str) -> Dict[str, List[str]]:
+        """返回该玩家每个槽位**当前处于"已触发待刷新"状态**的技能名列表。
+
+        防刷机制规定：数字自上次触发某技能以来没有真正变化过时，该技能不会再次触发。
+        本方法把这个内部状态翻译成 UI 能直接用的形式 —— 只要某个槽位出现在返回值的
+        列表里非空，UI 就可以把它显示成"灰色：已触发过，改变这个数字才能再次触发"。
+
+        :param player: ``'A'`` 或 ``'B'``
+        :return: ``{'A1': ['回血'], 'A2': []}`` 形式（槽位名 -> 锁住的技能中文名列表）
+        :raises ValueError: 玩家编号非法
+        """
+        self._validate_player(player)
+        locks: Dict[str, List[str]] = {
+            self._slot_name(player, slot): [] for slot in self.SLOTS
+        }
+
+        # 单数字技能：记录里带的槽位就是被锁住的槽位
+        for (skill, owner, slot), recorded in self._single_records.items():
+            if owner != player:
+                continue
+            # 代数没推进 = 数字没变过 = 仍然锁定；同时要求当前个位依然满足条件
+            if self._generation(owner, slot) <= recorded:
+                locks[self._slot_name(owner, slot)].append(self.SKILL_LABELS[skill])
+
+        # 双数字技能：只要有一个数字没刷新过，两个数字都在"等刷新"状态
+        for (skill, owner), _record in self._pair_records.items():
+            if owner != player:
+                continue
+            if self._is_pair_blocked((skill, owner), owner):
+                for slot in self.SLOTS:
+                    locks[self._slot_name(owner, slot)].append(self.SKILL_LABELS[skill])
+
+        return locks
+
+    def get_action_previews(self, player: str) -> Dict[str, Dict[str, Dict[str, dict]]]:
+        """预演该玩家**每一种可选操作**会触发哪些技能，供 UI 在选择加减时提示。
+
+        实现方式是在 :meth:`clone` 出来的副本上真实执行一次，因此判定结果永远与
+        真实对局一致 —— 规则只有引擎里这一份，UI 不需要复制任何技能条件。
+        副本上的操作不会影响真实对局。
+
+        :param player: ``'A'`` 或 ``'B'``（必须是当前回合的行动方）
+        :return: ``{攻击槽位: {防守槽位: {操作: {"skills": [...], "finish": 布尔}}}}``，
+                 其中 ``skills`` 是 ``[{'player': 'A', 'skill': '回血'}, ...]``。
+                 对局已结束或不是该玩家回合时返回空字典。
+        :raises ValueError: 玩家编号非法
+        """
+        self._validate_player(player)
+        if self.is_game_over() or self.current_turn != player:
+            return {}
+
+        previews: Dict[str, Dict[str, Dict[str, dict]]] = {}
+        for slot in self.SLOTS:
+            by_defender: Dict[str, Dict[str, dict]] = {}
+            for defender_slot in self.SLOTS:
+                by_operation: Dict[str, dict] = {}
+                for operation in self.OPERATIONS:
+                    simulation = self.clone()
+                    events = simulation.execute_action(
+                        player, slot, defender_slot, operation
+                    )
+                    by_operation[operation] = {
+                        "skills": self._skills_in_events(events),
+                        "finish": simulation.is_game_over(),
+                    }
+                by_defender[str(defender_slot)] = by_operation
+            previews[str(slot)] = by_defender
+        return previews
+
+    @classmethod
+    def _skills_in_events(cls, events: List[str]) -> List[Dict[str, str]]:
+        """从事件日志里解析出"谁触发了什么技能"，供操作预演使用。
+
+        "被锁链缠住"这类**不是技能触发**的事件要排除掉。
+        """
+        found: List[Dict[str, str]] = []
+        for text in events:
+            if "缠住" in text:
+                continue
+            for label in cls.SKILL_LABELS.values():
+                if label in text:
+                    owner = text[0] if text[:1] in cls.PLAYERS else ""
+                    found.append({"player": owner, "skill": label})
+        return found
 
     @staticmethod
     def split_digits(value: int) -> Tuple[int, int]:
@@ -296,6 +402,7 @@ class GameEngine:
         if self.is_game_over():
             return
         self._winner = self._opponent(player)
+        self._end_reason = f"{player}认输"
 
     def execute_action(
         self,
@@ -469,9 +576,9 @@ class GameEngine:
         return []
 
     def _check_boomerang(self) -> List[str]:
-        """技能 2「旋镖」：某玩家两个数字个位数都是 8，则对对手造成伤害。
+        """技能 2「旋镖」：某玩家两个数字个位数都是 8，则对对手造成 2 点伤害。
 
-        两个数字都 ``>= 30`` 时伤害提升为 2，否则为 1。
+        伤害固定为 2，没有重击档位（见 ``BOOMERANG_DAMAGE`` 处的说明）。
         防刷：两个数字都必须相对上次触发时发生变化。
         """
         for player in self.PLAYERS:
@@ -484,11 +591,7 @@ class GameEngine:
                 continue
 
             self._mark_pair(key, player)
-            damage = (
-                self.BOOMERANG_HEAVY_DAMAGE
-                if value_1 >= self.BOOMERANG_HEAVY_MIN and value_2 >= self.BOOMERANG_HEAVY_MIN
-                else self.BOOMERANG_DAMAGE
-            )
+            damage = self.BOOMERANG_DAMAGE
             opponent = self._opponent(player)
             self._damage(opponent, damage)
             return [f"{player}触发旋镖，{opponent}受到{damage}点伤害"]
@@ -665,6 +768,7 @@ class GameEngine:
 
         if streak >= self.IDLE_LOSS_STREAK:
             self._winner = self._opponent(player)
+            self._end_reason = f"{player}连续{streak}回合空过判负"
             return [
                 f"{player}连续{streak}回合空过，视为认输，{self._winner} 获胜"
             ]
@@ -706,10 +810,13 @@ class GameEngine:
 
         if self.hp_a > self.hp_b:
             self._winner = "A"
+            self._end_reason = f"连续{self.STALEMATE_LIMIT}手无进展，按血量判定 A 胜"
         elif self.hp_b > self.hp_a:
             self._winner = "B"
+            self._end_reason = f"连续{self.STALEMATE_LIMIT}手无进展，按血量判定 B 胜"
         else:
             self._drawn = True
+            self._end_reason = f"连续{self.STALEMATE_LIMIT}手无进展，双方血量相同判平局"
 
         verdict = "平局" if self._drawn else f"{self._winner} 获胜"
         return [
@@ -721,6 +828,9 @@ class GameEngine:
         before = self.hp_a if player == "A" else self.hp_b
         after = max(self.HP_MIN, before - amount)
         self._set_hp(player, after)
+        # 记录败因：血量归零是"被打死"这一类结局（投降 / 空过判负 / 僵持各有自己的说明）
+        if after <= self.HP_MIN and not self._end_reason:
+            self._end_reason = f"{player}血量归零"
         return before - after
 
     def _heal(self, player: str, amount: int) -> int:

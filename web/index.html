@@ -247,6 +247,14 @@
     box-shadow: 0 0 0 2px rgba(244,63,94,0.35), 0 10px 30px -8px rgba(244,63,94,0.5); transform: translateY(-3px); }
   .card.dim { opacity: 0.45; }
 
+  /* 防刷状态提示：这个数字刚触发过技能、但还没真正变动过 -> 变灰 + 角标 */
+  .card.locked { opacity: 0.5; border-style: dashed; }
+  .card .lock-tag {
+    position: absolute; bottom: 5px; left: 50%; transform: translateX(-50%);
+    font-size: 9px; font-weight: 700; color: var(--warn); white-space: nowrap;
+    background: rgba(251, 191, 36, 0.16); border-radius: 999px; padding: 1px 7px;
+  }
+
   .versus { display: flex; align-items: center; gap: 12px; justify-content: center;
             color: var(--text-faint); font-size: var(--font-small); }
   .versus .line { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--border), transparent); }
@@ -316,6 +324,10 @@
   .opt-btn .opt-result { font-size: 12px; color: var(--text-faint); }
   .opt-btn .opt-result b { font-size: 15px; }
   .opt-btn .opt-warn { font-size: 11px; font-weight: 700; color: #fb923c; }
+  /* 结算后能触发什么技能的小字提示 */
+  .opt-btn .opt-skill { font-size: 11px; font-weight: 700; color: var(--warn); line-height: 1.35; }
+  .opt-btn .opt-skill.finish { color: var(--good); }
+  .opt-btn .opt-skill.none { color: var(--text-faint); font-weight: 500; }
   .opt-btn.plus .opt-op { color: var(--good); }
   .opt-btn.minus .opt-op { color: var(--hp-full); }
   .opt-btn.plus:hover { border-color: var(--good); box-shadow: 0 10px 26px -12px rgba(52,211,153,1); }
@@ -352,7 +364,15 @@
     box-shadow: 0 30px 80px rgba(0,0,0,0.6);
   }
   .result-title { font-size: 30px; font-weight: 800; margin-bottom: 8px; }
-  .result-sub { color: var(--text-dim); font-size: var(--font-small); margin-bottom: 22px; }
+  .result-sub { color: var(--text-dim); font-size: var(--font-small); margin-bottom: 6px; }
+  .result-reason { color: var(--warn); font-size: var(--font-small); font-weight: 700; margin-bottom: 16px; }
+  .result-log-title { text-align: left; }
+  .result-log {
+    text-align: left; max-height: 210px; overflow-y: auto; margin-bottom: 20px;
+    border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.24);
+  }
+  .result-log .log-item { animation: none; }
   .result-btns { display: flex; gap: 10px; }
   .result-btns .btn { flex: 1; }
 
@@ -593,6 +613,9 @@
   <div class="result-card">
     <div class="result-title" id="result-title">—</div>
     <div class="result-sub" id="result-sub"></div>
+    <div class="result-reason" id="result-reason"></div>
+    <div class="log-title result-log-title">对局日志（越靠下越接近结束）</div>
+    <div class="result-log" id="result-log"></div>
     <div class="result-btns">
       <button class="btn primary" id="btn-rematch">再来一局</button>
       <button class="btn ghost" id="btn-quit">退出</button>
@@ -665,7 +688,7 @@
         <tr><th>技能</th><th>触发条件</th><th>效果</th></tr>
         <tr><td>💚 回血</td><td>你的某个数字个位是 <span class="cond">6</span></td><td>自己回 1 格血（上限 5）</td></tr>
         <tr><td>🔩 钻头</td><td>你的某个数字个位是 <span class="cond">7</span></td><td>对手 −1 格血</td></tr>
-        <tr><td>🪃 旋镖</td><td>两个数字个位<span class="cond">都是 8</span></td><td>对手 −1 格血；两个数字都 ≥30 时 −2 格</td></tr>
+        <tr><td>🪃 旋镖</td><td>两个数字个位<span class="cond">都是 8</span></td><td>对手 −2 格血</td></tr>
         <tr><td>💰 恭喜发财</td><td>两个数字都 <span class="cond">≥30</span>，个位分别是 <span class="cond">5 和 0</span></td><td>对手 −3 格血</td></tr>
         <tr><td>🍡 糖葫芦</td><td>两个数字都 <span class="cond">≥15</span>，个位分别是 <span class="cond">8 和 1</span></td><td>自己回 2 格血（上限 5）</td></tr>
         <tr><td>⛓ 锁链</td><td>两个数字都 <span class="cond">≥20</span>，个位<span class="cond">都是 9</span></td><td>对手下一回合直接被跳过</td></tr>
@@ -1027,13 +1050,33 @@ function eventIcon(text) {
   return '';
 }
 
+function skillIcon(name) {
+  for (let i = 0; i < SKILL_ICONS.length; i++) {
+    if (SKILL_ICONS[i][0] === name) return SKILL_ICONS[i][1] + ' ';
+  }
+  return '';
+}
+
+/* 引擎的事件日志用 A / B 指代玩家，这里换成真实昵称（含 AI 档位名）。
+   一次替换完成，避免昵称里本身带 A/B 时被二次替换。 */
+function prettyText(text) {
+  if (!text) return text;
+  const names = (app.state && app.state.names) || {};
+  const you = (app.state && app.state.you) || 'A';
+  const foeRole = you === 'A' ? 'B' : 'A';
+  const mine = names[you] || (you === 'A' ? '玩家 A' : '玩家 B');
+  const foe = names[foeRole] || (foeRole === 'A' ? '玩家 A' : '玩家 B');
+  return text.replace(/\b(A|B)\b/g, (token) => (token === you ? mine : foe));
+}
+
 function collectEvents(events) {
   if (!events || !events.length) return;
   const signature = events.join('|');
   if (signature === app.lastEvents) return;
   app.lastEvents = signature;
   events.forEach((text) => app.logs.unshift({ kind: eventKind(text), text: text }));
-  if (app.logs.length > 60) app.logs.length = 60;
+  // 结算界面要还原整局的来龙去脉，所以多留一些（对局内只显示最近 24 条）
+  if (app.logs.length > 300) app.logs.length = 300;
 }
 
 function renderLog() {
@@ -1045,7 +1088,7 @@ function renderLog() {
   app.logs.slice(0, 24).forEach((entry) => {
     const div = document.createElement('div');
     div.className = 'log-item ' + entry.kind;
-    div.textContent = eventIcon(entry.text) + entry.text;
+    div.textContent = eventIcon(entry.text) + prettyText(entry.text);
     log.insertBefore(div, anchor.nextSibling);
   });
 }
@@ -1130,18 +1173,30 @@ function renderSide(which, role, g, state) {
   const cards = $(which + '-cards');
   cards.innerHTML = '';
   const canAct = g.started && !g.over && g.turn === app.you;
+  const locks = (g.locks && g.locks[role]) || {};
   values.forEach((value, index) => {
-    cards.appendChild(buildCard(role, index, value, isMe, canAct));
+    cards.appendChild(
+      buildCard(role, index, value, isMe, canAct, locks[role + (index + 1)] || [])
+    );
   });
 }
 
-function buildCard(role, index, value, isMe, canAct) {
+function buildCard(role, index, value, isMe, canAct, locked) {
   const card = document.createElement('div');
   card.className = 'card ' + tierClass(value);
 
   let inner = `<span class="slot-tag">${role}${index + 1}</span>`;
   if (value >= 10) inner += `<span class="tens">${Math.floor(value / 10)}</span>`;
   inner += `<span class="ones">${value % 10}</span>`;
+
+  // 防刷状态：这个数字触发过技能、且还没变动过 -> 变灰并标注技能名
+  locked = locked || [];
+  if (locked.length) {
+    card.classList.add('locked');
+    card.title = `已触发过「${locked.join('、')}」；`
+      + `改变这个数字之后才会再次触发（绕一圈变回来也算）`;
+    inner += `<span class="lock-tag">${locked.map(skillIcon).join('')}已触发</span>`;
+  }
   card.innerHTML = inner;
 
   const sel = app.selection;
@@ -1212,6 +1267,10 @@ function openPopover() {
     { op: '-', label: '－ 减', calc: subFormula(mineVal, foeOnes), cls: 'minus' },
   ];
 
+  // 服务端预演好的结果：这一手会让谁触发什么技能（规则只在引擎里一份，前端不复制条件）
+  const previews = (g.previews || {})[String(app.selection.mine + 1)] || {};
+  const byDefender = previews[String(app.selection.foe + 1)] || {};
+
   const box = $('popover-options');
   box.innerHTML = '';
   options.forEach((opt) => {
@@ -1229,12 +1288,25 @@ function openPopover() {
     btn.innerHTML =
       `<span class="opt-op">${opt.label}</span>` +
       `<span class="opt-result">${mineVal} → <b class="${tierClass(result)}">${result}</b></span>` +
-      note;
+      note + skillPreviewNote(byDefender[opt.op], me);
     btn.addEventListener('click', () => submitAction(opt.op));
     box.appendChild(btn);
   });
 
   $('popover').classList.add('show');
+}
+
+/* 把预演结果渲染成一行小字：自己触发的技能、对手触发的技能、以及能否直接终结对局 */
+function skillPreviewNote(preview, me) {
+  if (!preview) return '';
+  const parts = [];
+  preview.skills.forEach((item) => {
+    const icon = skillIcon(item.skill);
+    parts.push(item.player === me ? `⚡${icon}${item.skill}` : `对手 ${icon}${item.skill}`);
+  });
+  if (preview.finish) parts.push('⚔ 直接终结对局');
+  if (!parts.length) return '<span class="opt-skill none">无技能触发</span>';
+  return `<span class="opt-skill${preview.finish ? ' finish' : ''}">${parts.join(' · ')}</span>`;
 }
 
 function submitAction(operation) {
@@ -1323,22 +1395,53 @@ function maybeShowResult(g, state) {
   app.gameOverShown = true;
 
   const me = state.you;
+  const foe = me === 'A' ? 'B' : 'A';
+  const myName = state.names[me] || (me === 'A' ? '玩家 A' : '玩家 B');
+  const foeName = state.names[foe] || (foe === 'A' ? '玩家 A' : '玩家 B');
+  const myHp = me === 'A' ? g.hp_a : g.hp_b;
+  const foeHp = foe === 'A' ? g.hp_a : g.hp_b;
+  const score = `你（${myName}）剩 ${myHp} 血 · 对手（${foeName}）剩 ${foeHp} 血`;
+
   let title, sub;
   if (g.draw) {
     title = '平局';
-    sub = '双方血量相同，僵持判定为平局';
+    sub = score;
   } else if (g.winner === me) {
     title = '🏆 你赢了';
-    sub = state.names[g.winner] || '';
+    sub = score;
   } else {
     title = '你输了';
-    sub = `${state.names[g.winner] || g.winner} 获胜`;
+    sub = `${foeName} 获胜 · ${score}`;
   }
   $('result-title').textContent = title;
   $('result-title').style.color = g.draw ? 'var(--text-dim)'
     : (g.winner === me ? 'var(--good)' : 'var(--bad)');
   $('result-sub').textContent = sub;
+
+  // 败因（引擎给出），把里面的 A / B 换成真实昵称
+  const reason = $('result-reason');
+  reason.textContent = g.end_reason ? '结束原因：' + prettyText(g.end_reason) : '';
+  reason.style.display = g.end_reason ? 'block' : 'none';
+
+  renderResultLog();
   $('result').classList.add('on');
+}
+
+/* 结算页的完整对局日志：按时间正序排列，滚到最底部（最接近结束的一手） */
+function renderResultLog() {
+  const box = $('result-log');
+  box.innerHTML = '';
+  if (!app.logs.length) {
+    box.innerHTML = '<div class="log-empty">本局没有产生事件</div>';
+    return;
+  }
+  app.logs.slice().reverse().forEach((entry) => {
+    const div = document.createElement('div');
+    div.className = 'log-item ' + entry.kind;
+    div.textContent = eventIcon(entry.text) + prettyText(entry.text);
+    box.appendChild(div);
+  });
+  box.scrollTop = box.scrollHeight;
 }
 
 $('btn-rematch').addEventListener('click', () => {
